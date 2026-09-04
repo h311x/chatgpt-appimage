@@ -108,6 +108,7 @@ check_host() {
   need_cmd file
   need_cmd install
   need_cmd desktop-file-validate
+  need_cmd python3
 }
 
 download() {
@@ -310,7 +311,7 @@ WRAP
   ' "$EXTRACT_DIR/usr/share/applications/chatgpt.desktop" >"$APPDIR/chatgpt.desktop"
   chmod 0644 "$APPDIR/chatgpt.desktop"
   cp -a "$APPDIR/chatgpt.desktop" "$APPDIR/usr/share/applications/chatgpt.desktop"
-  desktop-file-validate "$APPDIR/chatgpt.desktop"
+  desktop-file-validate "$APPDIR/chatgpt.desktop" >&2 || die "invalid chatgpt.desktop"
 
   install -m 0755 "$ROOT/packaging/AppRun" "$APPDIR/AppRun"
 }
@@ -483,7 +484,7 @@ pack_appimage() {
   export APPIMAGE_EXTRACT_AND_RUN=1
   export ARCH=x86_64
   export VERSION="$DEB_VERSION"
-  "$CACHE_DIR/appimagetool-x86_64.AppImage" --no-appstream "$APPDIR" "$out"
+  "$CACHE_DIR/appimagetool-x86_64.AppImage" --no-appstream "$APPDIR" "$out" >&2
   chmod 0755 "$out"
   printf '%s\n' "$out"
 }
@@ -505,7 +506,15 @@ smoke_check() {
   log "size: $(du -h "$out" | awk '{print $1}')"
   log "appimage-offset: $offset"
   log "glibc floor (bundled libs + ChatGPT ELF): $(glibc_floor)"
-  log "This VM is headless — not launching the GUI. On a desktop: $out"
+
+  local reported
+  reported="$("$out" --version 2>/dev/null | tail -n 1 | tr -d '\r')"
+  if [ "$reported" = "$DEB_VERSION" ]; then
+    log "ChatGPT --version: $reported"
+  else
+    log "note: ChatGPT --version reported '${reported:-<empty>}' (deb version is $DEB_VERSION)"
+  fi
+  log "This VM is headless — GUI launch is not verified. On a desktop: $out"
 }
 
 main() {

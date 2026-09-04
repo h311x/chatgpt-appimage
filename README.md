@@ -85,7 +85,7 @@ Build steps:
   # or
   ./ChatGPT-*-x86_64.AppImage --appimage-extract-and-run
   ```
-- **glibc:** the AppImage does not bundle glibc. The official `.deb` already wants `libc6 >= 2.35`. Libraries bundled from Ubuntu 24.04 typically need a host glibc around **2.38–2.39**. Current SteamOS / Bazzite / Arch snapshots are usually new enough; very old Deck images may not be. The build script prints a glibc floor from `objdump`.
+- **glibc:** the AppImage does not bundle glibc. The official `.deb` already wants `libc6 >= 2.35`. Libraries bundled from Ubuntu 24.04 currently need **GLIBC_2.38** (the build script prints the floor). Current SteamOS / Bazzite / Arch snapshots are usually new enough; very old Deck images may not be.
 - **Sandbox:** the official package has no `chrome-sandbox`. Chromium uses user namespaces. If a host blocks those, start with `--no-sandbox` (last resort).
 - **GPU:** Mesa / NVIDIA stay on the host. That is what you want on SteamOS.
 - **xdg-open / git:** not bundled. The host’s tools are used for browser links and Codex git features.
