@@ -1,0 +1,30 @@
+#!/bin/sh
+# Entry point for the ChatGPT AppImage (official OpenAI Linux binaries).
+set -e
+
+self=$(readlink -f "$0")
+HERE=${self%/*}
+export APPDIR="${APPDIR:-$HERE}"
+
+# linuxdeploy / linuxdeploy-plugin-gtk drop helpers here (GTK modules, pixbuf loaders, …).
+if [ -d "$APPDIR/apprun-hooks" ]; then
+  for hook in "$APPDIR"/apprun-hooks/*; do
+    [ -e "$hook" ] || continue
+    # shellcheck disable=SC1090
+    . "$hook"
+  done
+fi
+
+# Electron ships libEGL / SwiftShader next to the binary; linuxdeploy puts the
+# rest of the Ubuntu deps in usr/lib. Keep the Electron dir first.
+export LD_LIBRARY_PATH="${APPDIR}/usr/lib/chatgpt:${APPDIR}/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
+# The AppImage runtime sets ARGV0 to the AppImage path; Electron treats argv[0]
+# as the helper name if we leave that in place.
+unset ARGV0
+
+# Official .deb has no chrome-sandbox; Chromium uses user namespaces instead.
+# If a host blocks userns, pass --no-sandbox on the command line.
+
+cd "${APPDIR}/usr/lib/chatgpt"
+exec "${APPDIR}/usr/lib/chatgpt/ChatGPT" "$@"
