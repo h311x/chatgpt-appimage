@@ -11,7 +11,7 @@ ROLLING_DEB_URL="${CHATGPT_ROLLING_DEB_URL:-$REPO_BASE/latest/chatgpt_amd64.deb}
 LINUXDEPLOY_VERSION="${LINUXDEPLOY_VERSION:-1-alpha-20251107-1}"
 LINUXDEPLOY_URL="${LINUXDEPLOY_URL:-https://github.com/linuxdeploy/linuxdeploy/releases/download/${LINUXDEPLOY_VERSION}/linuxdeploy-x86_64.AppImage}"
 APPIMAGETOOL_URL="${APPIMAGETOOL_URL:-https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage}"
-GTK_PLUGIN_URL="${GTK_PLUGIN_URL:-https://raw.githubusercontent.com/linuxdeploy/linuxdeploy-plugin-gtk/8ae62b8b20d54d51900dad8e5b8e14ea175e5615/linuxdeploy-plugin-gtk.sh}"
+GTK_PLUGIN_URL="${GTK_PLUGIN_URL:-https://raw.githubusercontent.com/linuxdeploy/linuxdeploy-plugin-gtk/1ee2a937551bac53c6bf47f8123eb4af7c693b91/linuxdeploy-plugin-gtk.sh}"
 
 CACHE_DIR="${CACHE_DIR:-$ROOT/.cache}"
 WORK_DIR="${WORK_DIR:-$ROOT/build}"
@@ -20,6 +20,7 @@ OUTPUT_DIR="${OUTPUT_DIR:-$ROOT/dist}"
 APPDIR="$WORK_DIR/ChatGPT.AppDir"
 EXTRACT_DIR="$WORK_DIR/deb-extract"
 DEB_PATH=""
+DEB_URL=""
 DEB_VERSION=""
 DEB_SHA256=""
 SKIP_GTK_PLUGIN=0
@@ -144,8 +145,8 @@ resolve_from_packages() {
   [ -n "$version" ] && [ -n "$filename" ] && [ -n "$sha" ] || die "failed to parse chatgpt stanza from Packages index"
   DEB_VERSION="$version"
   DEB_SHA256="$sha"
+  DEB_URL="$REPO_BASE/$filename"
   log "Packages index: chatgpt $DEB_VERSION (${size:-?} bytes, sha256 ${DEB_SHA256:0:12}…)"
-  printf '%s/%s\n' "$REPO_BASE" "$filename"
 }
 
 ensure_deb() {
@@ -174,6 +175,7 @@ ensure_deb() {
 
   if [ -n "$DEB_VERSION" ]; then
     url="$REPO_BASE/pool/main/c/chatgpt/chatgpt_${DEB_VERSION}_amd64.deb"
+    dest="$CACHE_DIR/chatgpt_${DEB_VERSION}_amd64.deb"
     # Prefer SHA256 from Packages when the requested version is the current one.
     local index="$CACHE_DIR/Packages"
     if download "$PACKAGES_URL" "$index"; then
@@ -184,7 +186,9 @@ ensure_deb() {
       fi
     fi
   else
-    url="$(resolve_from_packages)"
+    # Must not run this in a subshell — it sets DEB_VERSION / DEB_SHA256 / DEB_URL.
+    resolve_from_packages
+    url="$DEB_URL"
     dest="$CACHE_DIR/chatgpt_${DEB_VERSION}_amd64.deb"
   fi
 
@@ -220,8 +224,8 @@ ensure_tools() {
   if [ "$SKIP_GTK_PLUGIN" -eq 0 ]; then
     [ -f "$gtk" ] || download "$GTK_PLUGIN_URL" "$gtk"
     chmod +x "$gtk"
-    # linuxdeploy finds plugins on PATH by filename linuxdeploy-plugin-*.sh
-    ln -sfn "$gtk" "$CACHE_DIR/linuxdeploy-plugin-gtk.sh"
+    # linuxdeploy finds linuxdeploy-plugin-*.sh on PATH.
+    export PATH="$CACHE_DIR:$PATH"
   fi
 }
 
