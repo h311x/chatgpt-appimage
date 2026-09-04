@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Repackage OpenAI's official ChatGPT Linux amd64 .deb as a self-contained AppImage.
+# Successful builds print only the AppImage path on stdout; everything else is stderr.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -11,20 +12,35 @@ ROLLING_DEB_URL="${CHATGPT_ROLLING_DEB_URL:-$REPO_BASE/latest/chatgpt_amd64.deb}
 LINUXDEPLOY_VERSION="${LINUXDEPLOY_VERSION:-1-alpha-20251107-1}"
 LINUXDEPLOY_URL="${LINUXDEPLOY_URL:-https://github.com/linuxdeploy/linuxdeploy/releases/download/${LINUXDEPLOY_VERSION}/linuxdeploy-x86_64.AppImage}"
 APPIMAGETOOL_URL="${APPIMAGETOOL_URL:-https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage}"
+# Pinned blob, not linuxdeploy-plugin-gtk/master — master has moved and 404'd before.
 GTK_PLUGIN_URL="${GTK_PLUGIN_URL:-https://raw.githubusercontent.com/linuxdeploy/linuxdeploy-plugin-gtk/1ee2a937551bac53c6bf47f8123eb4af7c693b91/linuxdeploy-plugin-gtk.sh}"
 
 CACHE_DIR="${CACHE_DIR:-$ROOT/.cache}"
 WORK_DIR="${WORK_DIR:-$ROOT/build}"
 OUTPUT_DIR="${OUTPUT_DIR:-$ROOT/dist}"
 
-APPDIR="$WORK_DIR/ChatGPT.AppDir"
-EXTRACT_DIR="$WORK_DIR/deb-extract"
+APPDIR=""
+EXTRACT_DIR=""
+PARK_DIR=""
+APPIMAGE_PATH=""
 DEB_PATH=""
 DEB_URL=""
 DEB_VERSION=""
 DEB_SHA256=""
 SKIP_GTK_PLUGIN=0
 USE_ROLLING_URL=0
+
+# linuxdeploy walks every ELF in AppDir. Park Qt shims (NEEDED Qt, not a Depends)
+# and resources/ (musl/static native modules) so it cannot rewrite them.
+PARK_RELS=(usr/lib/chatgpt/libqt5_shim.so usr/lib/chatgpt/libqt6_shim.so usr/lib/chatgpt/resources)
+
+# Electron dlopen targets — not always in DT_NEEDED.
+EXTRA_LIBS=(
+  libnotify.so.4 libXss.so.1 libXtst.so.6 libxcb-dri3.so.0
+  libusb-1.0.so.0 libsecret-1.so.0 libxshmfence.so.1
+  libnss3.so libnssutil3.so libsmime3.so libnspr4.so libplc4.so libplds4.so
+  libsoftokn3.so libfreebl3.so libfreeblpriv3.so libnssckbi.so libnssdbm3.so
+)
 
 usage() {
   cat <<'EOF'
@@ -102,20 +118,41 @@ parse_args() {
 check_host() {
   [ "$(uname -s)" = Linux ] || die "Linux is required"
   [ "$(uname -m)" = x86_64 ] || die "v1 only supports amd64/x86_64 (host is $(uname -m))"
-  need_cmd curl
-  need_cmd dpkg-deb
-  need_cmd sha256sum
-  need_cmd file
-  need_cmd install
-  need_cmd desktop-file-validate
-  need_cmd python3
+  local cmd
+  for cmd in curl dpkg-deb sha256sum file install desktop-file-validate python3 mksquashfs awk ldconfig; do
+    need_cmd "$cmd"
+  done
+  python3 - <<'PY' >&2 || die "need python3-gi and gir1.2-gdkpixbuf-2.0 (to resize the 1024px icon)"
+import gi
+gi.require_version("GdkPixbuf", "2.0")
+from gi.repository import GdkPixbuf
+PY
+  if [ "$SKIP_GTK_PLUGIN" -eq 0 ]; then
+    need_cmd pkg-config
+    pkg-config --exists gtk+-3.0 || die "linuxdeploy-plugin-gtk needs pkg-config and GTK 3 development files (libgtk-3-dev). Re-run with --skip-gtk-plugin to bundle ELF NEEDED libs only."
+  fi
+}
+
+setup_dirs() {
+  mkdir -p "$CACHE_DIR" "$WORK_DIR" "$OUTPUT_DIR"
+  CACHE_DIR="$(cd "$CACHE_DIR" && pwd)"
+  WORK_DIR="$(cd "$WORK_DIR" && pwd)"
+  OUTPUT_DIR="$(cd "$OUTPUT_DIR" && pwd)"
+  APPDIR="$WORK_DIR/ChatGPT.AppDir"
+  EXTRACT_DIR="$WORK_DIR/deb-extract"
+  PARK_DIR="$WORK_DIR/parked-payload"
 }
 
 download() {
   local url="$1" dest="$2"
+  local tmp="${dest}.part"
   log "Downloading $url"
   mkdir -p "$(dirname "$dest")"
-  curl -fL --retry 4 --retry-delay 4 --progress-bar -o "$dest" "$url"
+  if ! curl -fL --retry 4 --retry-delay 4 --progress-bar -o "$tmp" "$url"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  mv "$tmp" "$dest"
 }
 
 sha256_of() {
@@ -137,8 +174,8 @@ packages_field() {
 
 resolve_from_packages() {
   local index="$CACHE_DIR/Packages"
-  download "$PACKAGES_URL" "$index"
   local version filename sha size
+  download "$PACKAGES_URL" "$index" || die "failed to download Packages index"
   version="$(packages_field Version <"$index")"
   filename="$(packages_field Filename <"$index")"
   sha="$(packages_field SHA256 <"$index")"
@@ -151,8 +188,6 @@ resolve_from_packages() {
 }
 
 ensure_deb() {
-  mkdir -p "$CACHE_DIR" "$WORK_DIR" "$OUTPUT_DIR"
-
   if [ -n "$DEB_PATH" ]; then
     [ -f "$DEB_PATH" ] || die "deb not found: $DEB_PATH"
     DEB_PATH="$(readlink -f "$DEB_PATH")"
@@ -165,9 +200,8 @@ ensure_deb() {
   dest="$CACHE_DIR/chatgpt_${DEB_VERSION:-rolling}_amd64.deb"
 
   if [ "$USE_ROLLING_URL" -eq 1 ]; then
-    url="$ROLLING_DEB_URL"
     dest="$CACHE_DIR/chatgpt_amd64.deb"
-    download "$url" "$dest"
+    download "$ROLLING_DEB_URL" "$dest"
     DEB_PATH="$dest"
     DEB_VERSION="$(dpkg-deb -f "$DEB_PATH" Version)"
     log "Rolling deb version: $DEB_VERSION"
@@ -185,21 +219,29 @@ ensure_deb() {
       if [ "$indexed" = "$DEB_VERSION" ]; then
         DEB_SHA256="$(packages_field SHA256 <"$index")"
       fi
+    else
+      log "note: Packages index unavailable; building $DEB_VERSION without SHA256"
     fi
   else
-    # Must not run this in a subshell — it sets DEB_VERSION / DEB_SHA256 / DEB_URL.
     resolve_from_packages
     url="$DEB_URL"
     dest="$CACHE_DIR/chatgpt_${DEB_VERSION}_amd64.deb"
   fi
 
-  if [ -f "$dest" ] && [ -n "$DEB_SHA256" ]; then
-    if [ "$(sha256_of "$dest")" = "$DEB_SHA256" ]; then
+  if [ -f "$dest" ]; then
+    if [ -n "$DEB_SHA256" ] && [ "$(sha256_of "$dest")" = "$DEB_SHA256" ]; then
       log "Reusing cached deb $dest"
       DEB_PATH="$dest"
       return
     fi
-    log "Cached deb checksum mismatch; re-downloading"
+    if [ -z "$DEB_SHA256" ] && [ "$(dpkg-deb -f "$dest" Version 2>/dev/null || true)" = "$DEB_VERSION" ]; then
+      log "Reusing cached deb $dest (no Packages SHA256 for this version)"
+      DEB_PATH="$dest"
+      return
+    fi
+    if [ -n "$DEB_SHA256" ]; then
+      log "Cached deb checksum mismatch; re-downloading"
+    fi
   fi
 
   download "$url" "$dest"
@@ -218,15 +260,13 @@ ensure_tools() {
   local at="$CACHE_DIR/appimagetool-x86_64.AppImage"
   local gtk="$CACHE_DIR/linuxdeploy-plugin-gtk.sh"
 
-  [ -x "$ld" ] || download "$LINUXDEPLOY_URL" "$ld"
-  [ -x "$at" ] || download "$APPIMAGETOOL_URL" "$at"
+  [ -f "$ld" ] || download "$LINUXDEPLOY_URL" "$ld"
+  [ -f "$at" ] || download "$APPIMAGETOOL_URL" "$at"
   chmod +x "$ld" "$at"
 
   if [ "$SKIP_GTK_PLUGIN" -eq 0 ]; then
     [ -f "$gtk" ] || download "$GTK_PLUGIN_URL" "$gtk"
     chmod +x "$gtk"
-    # linuxdeploy finds linuxdeploy-plugin-*.sh on PATH.
-    export PATH="$CACHE_DIR:$PATH"
   fi
 }
 
@@ -292,9 +332,9 @@ WRAP
   # linuxdeploy only accepts a fixed set of raster sizes; the official pixmap is 1024².
   resize_png "$icon" "$APPDIR/chatgpt.png" 512
   install -m 0644 "$APPDIR/chatgpt.png" "$APPDIR/.DirIcon"
+  install -m 0644 "$APPDIR/chatgpt.png" "$APPDIR/usr/share/icons/hicolor/512x512/apps/chatgpt.png"
   install -m 0644 "$icon" "$APPDIR/usr/share/pixmaps/chatgpt.png"
   install -m 0644 "$icon" "$APPDIR/usr/share/icons/hicolor/1024x1024/apps/chatgpt.png"
-  resize_png "$icon" "$APPDIR/usr/share/icons/hicolor/512x512/apps/chatgpt.png" 512
   resize_png "$icon" "$APPDIR/usr/share/icons/hicolor/256x256/apps/chatgpt.png" 256
 
   # Official desktop file plus AppImage/KDE extras. Keep MimeType as shipped.
@@ -312,104 +352,49 @@ WRAP
   chmod 0644 "$APPDIR/chatgpt.desktop"
   cp -a "$APPDIR/chatgpt.desktop" "$APPDIR/usr/share/applications/chatgpt.desktop"
   desktop-file-validate "$APPDIR/chatgpt.desktop" >&2 || die "invalid chatgpt.desktop"
-
-  install -m 0755 "$ROOT/packaging/AppRun" "$APPDIR/AppRun"
 }
 
 resolve_lib() {
-  local name="$1"
-  local path
+  local name="$1" path
   path="$(ldconfig -p 2>/dev/null | awk -v n="$name" '$1 == n { print $NF; exit }')"
-  if [ -n "$path" ] && [ -e "$path" ]; then
-    printf '%s\n' "$path"
-    return 0
-  fi
-  return 1
+  [ -n "$path" ] && [ -e "$path" ] || return 1
+  printf '%s\n' "$path"
 }
 
-linuxdeploy_library_args() {
-  # These are Depends / typical Electron dlopen targets, not always in NEEDED.
-  local names=(
-    libnotify.so.4
-    libXss.so.1
-    libXtst.so.6
-    libxcb-dri3.so.0
-    libusb-1.0.so.0
-    libsecret-1.so.0
-    libxshmfence.so.1
-    libnss3.so
-    libnssutil3.so
-    libsmime3.so
-    libnspr4.so
-    libplc4.so
-    libplds4.so
-    libsoftokn3.so
-    libfreebl3.so
-    libfreeblpriv3.so
-    libnssckbi.so
-  )
-  local name path
-  for name in "${names[@]}"; do
-    if path="$(resolve_lib "$name")"; then
-      printf -- '--library=%s\n' "$path"
-    else
-      log "note: optional library not on host: $name"
-    fi
+park_payload() {
+  rm -rf "$PARK_DIR"
+  mkdir -p "$PARK_DIR"
+  local rel src dest
+  for rel in "${PARK_RELS[@]}"; do
+    src="$APPDIR/$rel"
+    [ -e "$src" ] || continue
+    dest="$PARK_DIR/$rel"
+    mkdir -p "$(dirname "$dest")"
+    mv "$src" "$dest"
+  done
+  log "Parked Qt shims / resources so linuxdeploy cannot rewrite them"
+}
+
+restore_payload() {
+  local rel
+  for rel in "${PARK_RELS[@]}"; do
+    [ -e "$PARK_DIR/$rel" ] || continue
+    mkdir -p "$APPDIR/$(dirname "$rel")"
+    mv "$PARK_DIR/$rel" "$APPDIR/$rel"
   done
 }
 
 copy_nss_checksums() {
-  local lib dest
+  local lib so chk
   mkdir -p "$APPDIR/usr/lib"
   for lib in libsoftokn3 libfreebl3 libfreeblpriv3 libnssdbm3; do
-    if [ -f "/usr/lib/x86_64-linux-gnu/${lib}.chk" ]; then
-      dest="$APPDIR/usr/lib/${lib}.chk"
-      cp -a "/usr/lib/x86_64-linux-gnu/${lib}.chk" "$dest"
-    fi
+    [ -e "$APPDIR/usr/lib/${lib}.so" ] || continue
+    so="$(resolve_lib "${lib}.so" || true)"
+    [ -n "$so" ] || continue
+    chk="$(dirname "$so")/${lib}.chk"
+    [ -f "$chk" ] || continue
+    cp -a "$chk" "$APPDIR/usr/lib/${lib}.chk"
   done
-}
-
-# linuxdeploy walks every ELF already in the AppDir. Chromium's optional Qt
-# shims NEEDED Qt (not a .deb Depends), and unused musl .node prebuilds NEEDED
-# musl. Park them for the bundling pass, then put them back unchanged.
-PARK_DIR="$WORK_DIR/parked-elf"
-PARK_MANIFEST="$WORK_DIR/parked-elf.manifest"
-
-park_unresolvable_elfs() {
-  rm -rf "$PARK_DIR"
-  mkdir -p "$PARK_DIR"
-  : >"$PARK_MANIFEST"
-
-  park_one() {
-    local src="$1"
-    local rel dest
-    [ -e "$src" ] || return 0
-    rel="${src#"$APPDIR"/}"
-    dest="$PARK_DIR/$rel"
-    mkdir -p "$(dirname "$dest")"
-    mv "$src" "$dest"
-    printf '%s\n' "$rel" >>"$PARK_MANIFEST"
-  }
-
-  park_one "$APPDIR/usr/lib/chatgpt/libqt5_shim.so"
-  park_one "$APPDIR/usr/lib/chatgpt/libqt6_shim.so"
-  # Native modules, Codex helpers, and foreign-arch prebuilds live here.
-  # linuxdeploy rewrites rpath and aborts on musl/static ELFs; leave them as shipped.
-  park_one "$APPDIR/usr/lib/chatgpt/resources"
-
-  if [ -s "$PARK_MANIFEST" ]; then
-    log "Parked $(wc -l <"$PARK_MANIFEST") paths linuxdeploy should not rewrite (Qt shims / resources tree)"
-  fi
-}
-
-restore_parked_elfs() {
-  [ -f "$PARK_MANIFEST" ] || return 0
-  local rel
-  while IFS= read -r rel; do
-    [ -n "$rel" ] || continue
-    mkdir -p "$APPDIR/$(dirname "$rel")"
-    mv "$PARK_DIR/$rel" "$APPDIR/$rel"
-  done <"$PARK_MANIFEST"
 }
 
 bundle_libraries() {
@@ -418,13 +403,11 @@ bundle_libraries() {
   export NO_STRIP=1
   export DISABLE_COPYRIGHT_FILES_DEPLOYMENT=1
   export LINUXDEPLOY="$CACHE_DIR/linuxdeploy-x86_64.AppImage"
-  export PATH="$CACHE_DIR:$PATH"
   export DEPLOY_GTK_VERSION=3
+  # linuxdeploy finds linuxdeploy-plugin-*.sh on PATH.
+  export PATH="$CACHE_DIR:$PATH"
 
-  park_unresolvable_elfs
-
-  local -a args
-  args=(
+  local -a ld_args=(
     --appdir "$APPDIR"
     --executable "$APPDIR/usr/lib/chatgpt/ChatGPT"
     --executable "$APPDIR/usr/lib/chatgpt/browser_crashpad_handler"
@@ -436,39 +419,38 @@ bundle_libraries() {
     --exclude-library 'libQt6*'
   )
 
-  local extra
-  while IFS= read -r extra; do
-    [ -n "$extra" ] || continue
-    args+=("$extra")
-  done < <(linuxdeploy_library_args)
+  local name path
+  for name in "${EXTRA_LIBS[@]}"; do
+    if path="$(resolve_lib "$name")"; then
+      ld_args+=("--library=$path")
+    else
+      log "note: optional library not on host: $name"
+    fi
+  done
 
   if [ "$SKIP_GTK_PLUGIN" -eq 0 ]; then
-    if ! command -v pkg-config >/dev/null || ! pkg-config --exists gtk+-3.0; then
-      die "linuxdeploy-plugin-gtk needs pkg-config and GTK 3 development files (libgtk-3-dev). Re-run with --skip-gtk-plugin to bundle ELF NEEDED libs only."
-    fi
-    args+=(--plugin gtk)
+    ld_args+=(--plugin gtk)
   fi
 
-  set +e
-  "$LINUXDEPLOY" "${args[@]}"
-  local rc=$?
-  set -e
-  restore_parked_elfs
-  [ "$rc" -eq 0 ] || die "linuxdeploy failed (exit $rc)"
+  park_payload
+  trap restore_payload EXIT
+  "$LINUXDEPLOY" "${ld_args[@]}" >&2 || die "linuxdeploy failed"
+  trap - EXIT
+  restore_payload
+
   copy_nss_checksums
   install -m 0755 "$ROOT/packaging/AppRun" "$APPDIR/AppRun"
 }
 
 glibc_floor() {
-  local f max=""
-  local -a targets=("$APPDIR/usr/lib/chatgpt/ChatGPT")
+  command -v objdump >/dev/null 2>&1 || { printf '%s\n' unknown; return 0; }
+  local f max="" v
   shopt -s nullglob
-  targets+=("$APPDIR"/usr/lib/*.so*)
+  local -a targets=("$APPDIR/usr/lib/chatgpt/ChatGPT" "$APPDIR"/usr/lib/*.so*)
   shopt -u nullglob
   for f in "${targets[@]}"; do
     [ -f "$f" ] || continue
-    file -b "$f" | grep -q '^ELF' || continue
-    local v
+    file -b "$f" 2>/dev/null | grep -q '^ELF' || continue
     v="$(objdump -T "$f" 2>/dev/null | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sort -V | tail -1 || true)"
     if [ -n "$v" ] && { [ -z "$max" ] || [ "$(printf '%s\n%s\n' "$max" "$v" | sort -V | tail -1)" = "$v" ]; }; then
       max="$v"
@@ -478,19 +460,18 @@ glibc_floor() {
 }
 
 pack_appimage() {
-  local out="$OUTPUT_DIR/ChatGPT-${DEB_VERSION}-x86_64.AppImage"
-  log "Packing $out"
-  rm -f "$out"
+  APPIMAGE_PATH="$OUTPUT_DIR/ChatGPT-${DEB_VERSION}-x86_64.AppImage"
+  log "Packing $APPIMAGE_PATH"
+  rm -f "$APPIMAGE_PATH"
   export APPIMAGE_EXTRACT_AND_RUN=1
   export ARCH=x86_64
   export VERSION="$DEB_VERSION"
-  "$CACHE_DIR/appimagetool-x86_64.AppImage" --no-appstream "$APPDIR" "$out" >&2
-  chmod 0755 "$out"
-  printf '%s\n' "$out"
+  "$CACHE_DIR/appimagetool-x86_64.AppImage" --no-appstream "$APPDIR" "$APPIMAGE_PATH" >&2
+  chmod 0755 "$APPIMAGE_PATH"
 }
 
 smoke_check() {
-  local out="$1"
+  local out="$APPIMAGE_PATH"
   log "Smoke-testing $out"
   [ -f "$out" ] || die "AppImage not created: $out"
   [ -x "$out" ] || die "AppImage is not executable: $out"
@@ -514,22 +495,22 @@ smoke_check() {
   else
     log "note: ChatGPT --version reported '${reported:-<empty>}' (deb version is $DEB_VERSION)"
   fi
-  log "This VM is headless — GUI launch is not verified. On a desktop: $out"
+  log "CLI smoke passed. GUI launch is not part of this script; on a desktop run: $out"
 }
 
 main() {
   parse_args "$@"
   check_host
+  setup_dirs
   ensure_deb
   ensure_tools
   extract_deb
   stage_appdir
   bundle_libraries
-  local out
-  out="$(pack_appimage)"
-  smoke_check "$out"
+  pack_appimage
+  smoke_check
   log "AppImage ready:"
-  printf '%s\n' "$out"
+  printf '%s\n' "$APPIMAGE_PATH"
 }
 
 main "$@"

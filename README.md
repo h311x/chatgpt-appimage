@@ -13,13 +13,13 @@ On an amd64 Linux host (Ubuntu 24.04 is what the official app targets; that is a
 ```bash
 sudo apt-get install -y curl dpkg-dev squashfs-tools desktop-file-utils \
   pkg-config libgtk-3-dev librsvg2-dev libpango1.0-dev libgdk-pixbuf-2.0-dev \
-  python3-gi gir1.2-gdkpixbuf-2.0 \
+  python3-gi gir1.2-gdkpixbuf-2.0 binutils \
   libnotify4 libnss3 libxss1 libxtst6 libusb-1.0-0 libsecret-1-0
 
 ./scripts/build-appimage.sh
 ```
 
-The script prints the output path, for example:
+Logs go to stderr. On success, stdout is a single line — the output path — so it is safe to capture:
 
 ```text
 dist/ChatGPT-26.901.31953-x86_64.AppImage
@@ -69,8 +69,8 @@ Build steps:
 
 1. Resolve and download the official amd64 `.deb` (SHA-256 when the Packages index is used).
 2. Extract it and copy `usr/lib/chatgpt/` unchanged into an AppDir (Chromium loads `resources.pak` / locales **next to the ELF**).
-3. Install the official `.desktop` + PNG (plus `StartupWMClass=ChatGPT` for KDE) and `packaging/AppRun`.
-4. Run [linuxdeploy](https://github.com/linuxdeploy/linuxdeploy) so GTK, NSS, ALSA, and other Ubuntu `.deb` Depends are copied into `usr/lib/` instead of being pulled from apt at runtime. [linuxdeploy-plugin-gtk](https://github.com/linuxdeploy/linuxdeploy-plugin-gtk) adds pixbuf loaders / immodules. Extra Electron `dlopen` libs (`libnotify`, NSS `softokn`/`freebl`, `libXss`, `libusb`, …) are passed with `--library`. glibc, libGL, libdrm, and Vulkan stay on the **host** (GPU drivers).
+3. Install the official `.desktop` + PNG (plus `StartupWMClass=ChatGPT` for KDE). `packaging/AppRun` is passed to linuxdeploy as `--custom-apprun` and reinstalled after bundling.
+4. Run [linuxdeploy](https://github.com/linuxdeploy/linuxdeploy) so GTK, NSS, ALSA, and other Ubuntu `.deb` Depends are copied into `usr/lib/` instead of being pulled from apt at runtime. [linuxdeploy-plugin-gtk](https://github.com/linuxdeploy/linuxdeploy-plugin-gtk) (pinned commit, not `master`) adds pixbuf loaders / immodules. Extra Electron `dlopen` libs (`libnotify`, NSS `softokn`/`freebl`/`nssdbm`, `libXss`, `libusb`, …) are passed with `--library`. Qt shims and the `resources/` tree are parked during this pass so linuxdeploy cannot rewrite musl/static ELFs, then restored. glibc, libGL, libdrm, and Vulkan stay on the **host** (GPU drivers).
 5. Pack with [appimagetool](https://github.com/AppImage/appimagetool) as `ChatGPT-<deb-version>-x86_64.AppImage`.
 
 `NO_STRIP=1` is set so linuxdeploy does not strip the 300 MB Electron binary.
@@ -92,7 +92,7 @@ Build steps:
 
 ## GUI / smoke checks
 
-The build script checks that the AppImage exists, is a 64-bit ELF, is executable, that `--appimage-help` / `--appimage-offset` work, and that `ChatGPT --version` matches the `.deb`.
+The build script’s CLI smoke check is: the AppImage exists, is a 64-bit ELF, is executable, `--appimage-help` / `--appimage-offset` work, and `ChatGPT --version` matches the `.deb`. It also prints the glibc symbol floor of the bundled ELFs. It does **not** open the GUI (that would hang a headless build).
 
 On a desktop, run the AppImage directly (needs **libfuse2** / `libfuse.so.2`). This packaging VM’s XFCE session (`DISPLAY=:1`) launched it with a native FUSE mount and showed the official **Sign in to ChatGPT** window — no extra Electron flags.
 
