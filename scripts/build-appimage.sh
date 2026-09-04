@@ -47,7 +47,7 @@ Environment:
 EOF
 }
 
-log() { printf '==> %s\n' "$*"; }
+log() { printf '==> %s\n' "$*" >&2; }
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 
 need_cmd() {
@@ -113,7 +113,7 @@ download() {
   local url="$1" dest="$2"
   log "Downloading $url"
   mkdir -p "$(dirname "$dest")"
-  curl -fL --retry 4 --retry-delay 4 -o "$dest" "$url"
+  curl -fL --retry 4 --retry-delay 4 --progress-bar -o "$dest" "$url"
 }
 
 sha256_of() {
@@ -160,7 +160,7 @@ ensure_deb() {
   fi
 
   local url dest
-  dest="$CACHE_DIR/chatgpt_${DEB_VERSION:-latest}_amd64.deb"
+  dest="$CACHE_DIR/chatgpt_${DEB_VERSION:-rolling}_amd64.deb"
 
   if [ "$USE_ROLLING_URL" -eq 1 ]; then
     url="$ROLLING_DEB_URL"
