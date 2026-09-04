@@ -347,6 +347,51 @@ copy_nss_checksums() {
   done
 }
 
+# linuxdeploy walks every ELF already in the AppDir. Chromium's optional Qt
+# shims NEEDED Qt (not a .deb Depends), and unused musl .node prebuilds NEEDED
+# musl. Park them for the bundling pass, then put them back unchanged.
+PARK_DIR="$WORK_DIR/parked-elf"
+PARK_MANIFEST="$WORK_DIR/parked-elf.manifest"
+
+park_unresolvable_elfs() {
+  rm -rf "$PARK_DIR"
+  mkdir -p "$PARK_DIR"
+  : >"$PARK_MANIFEST"
+
+  park_one() {
+    local src="$1"
+    local rel dest
+    [ -e "$src" ] || return 0
+    rel="${src#"$APPDIR"/}"
+    dest="$PARK_DIR/$rel"
+    mkdir -p "$(dirname "$dest")"
+    mv "$src" "$dest"
+    printf '%s\n' "$rel" >>"$PARK_MANIFEST"
+  }
+
+  park_one "$APPDIR/usr/lib/chatgpt/libqt5_shim.so"
+  park_one "$APPDIR/usr/lib/chatgpt/libqt6_shim.so"
+
+  local src
+  while IFS= read -r src; do
+    park_one "$src"
+  done < <(find "$APPDIR" -type f \( -name '*musl*.node' -o -name '*musl*.so*' \) || true)
+
+  if [ -s "$PARK_MANIFEST" ]; then
+    log "Parked $(wc -l <"$PARK_MANIFEST") ELF files linuxdeploy cannot resolve (Qt shims / musl prebuilds)"
+  fi
+}
+
+restore_parked_elfs() {
+  [ -f "$PARK_MANIFEST" ] || return 0
+  local rel
+  while IFS= read -r rel; do
+    [ -n "$rel" ] || continue
+    mkdir -p "$APPDIR/$(dirname "$rel")"
+    mv "$PARK_DIR/$rel" "$APPDIR/$rel"
+  done <"$PARK_MANIFEST"
+}
+
 bundle_libraries() {
   log "Bundling shared libraries with linuxdeploy"
   export APPIMAGE_EXTRACT_AND_RUN=1
@@ -356,6 +401,8 @@ bundle_libraries() {
   export PATH="$CACHE_DIR:$PATH"
   export DEPLOY_GTK_VERSION=3
 
+  park_unresolvable_elfs
+
   local -a args
   args=(
     --appdir "$APPDIR"
@@ -363,6 +410,10 @@ bundle_libraries() {
     --executable "$APPDIR/usr/lib/chatgpt/browser_crashpad_handler"
     --desktop-file "$APPDIR/chatgpt.desktop"
     --icon-file "$APPDIR/chatgpt.png"
+    --icon-filename chatgpt
+    --custom-apprun "$ROOT/packaging/AppRun"
+    --exclude-library 'libQt5*'
+    --exclude-library 'libQt6*'
   )
 
   local extra
@@ -378,9 +429,8 @@ bundle_libraries() {
     args+=(--plugin gtk)
   fi
 
-  # linuxdeploy replaces AppRun with a symlink; put ours back afterwards.
   "$LINUXDEPLOY" "${args[@]}"
-
+  restore_parked_elfs
   copy_nss_checksums
   install -m 0755 "$ROOT/packaging/AppRun" "$APPDIR/AppRun"
 }
