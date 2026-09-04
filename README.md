@@ -90,9 +90,17 @@ Build steps:
 - **GPU:** Mesa / NVIDIA stay on the host. That is what you want on SteamOS.
 - **xdg-open / git:** not bundled. The host’s tools are used for browser links and Codex git features.
 
-## Headless / CI smoke
+## GUI / smoke checks
 
-A VM without a display cannot show the ChatGPT window. The script still checks that the AppImage exists, is a 64-bit ELF, is executable, that `--appimage-help` / `--appimage-offset` work (no FUSE/GPU), and that `ChatGPT --version` matches the `.deb` version.
+The build script checks that the AppImage exists, is a 64-bit ELF, is executable, that `--appimage-help` / `--appimage-offset` work, and that `ChatGPT --version` matches the `.deb`.
+
+On a desktop, run the AppImage directly (needs **libfuse2** / `libfuse.so.2`). This packaging VM’s XFCE session (`DISPLAY=:1`) launched it with a native FUSE mount and showed the official **Sign in to ChatGPT** window — no extra Electron flags.
+
+If FUSE is missing:
+
+```bash
+APPIMAGE_EXTRACT_AND_RUN=1 ./dist/ChatGPT-*-x86_64.AppImage
+```
 
 ## Out of scope (v1)
 
