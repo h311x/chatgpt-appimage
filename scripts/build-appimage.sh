@@ -244,6 +244,22 @@ extract_deb() {
   [ -f "$EXTRACT_DIR/usr/share/pixmaps/chatgpt.png" ] || die "deb is missing chatgpt.png"
 }
 
+resize_png() {
+  local src="$1" dest="$2" size="$3"
+  python3 - "$src" "$dest" "$size" <<'PY'
+import sys
+import gi
+gi.require_version("GdkPixbuf", "2.0")
+from gi.repository import GdkPixbuf
+
+src, dest, size_s = sys.argv[1], sys.argv[2], sys.argv[3]
+size = int(size_s)
+pb = GdkPixbuf.Pixbuf.new_from_file(src)
+pb = pb.scale_simple(size, size, GdkPixbuf.InterpType.BILINEAR)
+pb.savev(dest, "png", [], [])
+PY
+}
+
 stage_appdir() {
   log "Staging AppDir at $APPDIR"
   rm -rf "$APPDIR"
@@ -251,6 +267,8 @@ stage_appdir() {
     "$APPDIR/usr/lib" \
     "$APPDIR/usr/bin" \
     "$APPDIR/usr/share/applications" \
+    "$APPDIR/usr/share/icons/hicolor/256x256/apps" \
+    "$APPDIR/usr/share/icons/hicolor/512x512/apps" \
     "$APPDIR/usr/share/icons/hicolor/1024x1024/apps" \
     "$APPDIR/usr/share/pixmaps" \
     "$APPDIR/usr/share/doc/chatgpt"
@@ -270,10 +288,13 @@ WRAP
   chmod 0755 "$APPDIR/usr/bin/chatgpt"
 
   local icon="$EXTRACT_DIR/usr/share/pixmaps/chatgpt.png"
-  install -m 0644 "$icon" "$APPDIR/chatgpt.png"
-  install -m 0644 "$icon" "$APPDIR/.DirIcon"
+  # linuxdeploy only accepts a fixed set of raster sizes; the official pixmap is 1024².
+  resize_png "$icon" "$APPDIR/chatgpt.png" 512
+  install -m 0644 "$APPDIR/chatgpt.png" "$APPDIR/.DirIcon"
   install -m 0644 "$icon" "$APPDIR/usr/share/pixmaps/chatgpt.png"
   install -m 0644 "$icon" "$APPDIR/usr/share/icons/hicolor/1024x1024/apps/chatgpt.png"
+  resize_png "$icon" "$APPDIR/usr/share/icons/hicolor/512x512/apps/chatgpt.png" 512
+  resize_png "$icon" "$APPDIR/usr/share/icons/hicolor/256x256/apps/chatgpt.png" 256
 
   # Official desktop file plus AppImage/KDE extras. Keep MimeType as shipped.
   awk -v ver="$DEB_VERSION" '
@@ -376,7 +397,7 @@ park_unresolvable_elfs() {
   park_one "$APPDIR/usr/lib/chatgpt/resources"
 
   if [ -s "$PARK_MANIFEST" ]; then
-    log "Parked $(wc -l <"$PARK_MANIFEST") ELF files linuxdeploy cannot resolve (Qt shims / musl prebuilds)"
+    log "Parked $(wc -l <"$PARK_MANIFEST") paths linuxdeploy should not rewrite (Qt shims / resources tree)"
   fi
 }
 

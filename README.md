@@ -13,6 +13,7 @@ On an amd64 Linux host (Ubuntu 24.04 is what the official app targets; that is a
 ```bash
 sudo apt-get install -y curl dpkg-dev squashfs-tools desktop-file-utils \
   pkg-config libgtk-3-dev librsvg2-dev libpango1.0-dev libgdk-pixbuf-2.0-dev \
+  python3-gi gir1.2-gdkpixbuf-2.0 \
   libnotify4 libnss3 libxss1 libxtst6 libusb-1.0-0 libsecret-1-0
 
 ./scripts/build-appimage.sh
