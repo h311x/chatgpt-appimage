@@ -497,7 +497,7 @@ smoke_check() {
   file "$out" | grep -q 'ELF 64-bit' || die "AppImage is not an ELF 64-bit file: $(file "$out")"
 
   export APPIMAGE_EXTRACT_AND_RUN=1
-  "$out" --appimage-help >/dev/null
+  "$out" --appimage-help >/dev/null 2>&1
   local offset
   offset="$("$out" --appimage-offset)"
   [ -n "$offset" ] || die "--appimage-offset produced no output"
