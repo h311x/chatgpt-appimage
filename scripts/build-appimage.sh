@@ -371,11 +371,9 @@ park_unresolvable_elfs() {
 
   park_one "$APPDIR/usr/lib/chatgpt/libqt5_shim.so"
   park_one "$APPDIR/usr/lib/chatgpt/libqt6_shim.so"
-
-  local src
-  while IFS= read -r src; do
-    park_one "$src"
-  done < <(find "$APPDIR" -type f \( -name '*musl*.node' -o -name '*musl*.so*' \) || true)
+  # Native modules, Codex helpers, and foreign-arch prebuilds live here.
+  # linuxdeploy rewrites rpath and aborts on musl/static ELFs; leave them as shipped.
+  park_one "$APPDIR/usr/lib/chatgpt/resources"
 
   if [ -s "$PARK_MANIFEST" ]; then
     log "Parked $(wc -l <"$PARK_MANIFEST") ELF files linuxdeploy cannot resolve (Qt shims / musl prebuilds)"
@@ -429,8 +427,12 @@ bundle_libraries() {
     args+=(--plugin gtk)
   fi
 
+  set +e
   "$LINUXDEPLOY" "${args[@]}"
+  local rc=$?
+  set -e
   restore_parked_elfs
+  [ "$rc" -eq 0 ] || die "linuxdeploy failed (exit $rc)"
   copy_nss_checksums
   install -m 0755 "$ROOT/packaging/AppRun" "$APPDIR/AppRun"
 }
