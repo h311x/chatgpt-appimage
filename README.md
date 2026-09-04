@@ -92,7 +92,7 @@ Build steps:
 
 ## Headless / CI smoke
 
-A VM without a display cannot launch ChatGPT. The script still checks that the AppImage exists, is a 64-bit ELF, is executable, and that `--appimage-help` / `--appimage-offset` work (those do not need FUSE or a GPU).
+A VM without a display cannot show the ChatGPT window. The script still checks that the AppImage exists, is a 64-bit ELF, is executable, that `--appimage-help` / `--appimage-offset` work (no FUSE/GPU), and that `ChatGPT --version` matches the `.deb` version.
 
 ## Out of scope (v1)
 
