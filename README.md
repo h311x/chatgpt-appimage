@@ -1,20 +1,17 @@
 # ChatGPT AppImage (unofficial)
 
-Repackage [OpenAI’s official Linux ChatGPT desktop app](https://learn.chatgpt.com/docs/linux/linux-app) into an **amd64 AppImage**. The payload is the real Electron binary from the official `.deb` — not a web wrapper, Flatpak, or root install.
+Repackage [OpenAI’s official Linux ChatGPT desktop app](https://learn.chatgpt.com/docs/linux/linux-app) into a **thin amd64 AppImage**. The payload is the real Electron binary from the official `.deb` — not a web wrapper, Flatpak, or root install.
 
-Intended for **SteamOS / Steam Deck Desktop Mode** via [Gear Lever](https://github.com/mijorus/gearlever), and for other distros that do not want Ubuntu/Fedora packages.
+This is a **thin** AppImage: it ships OpenAI’s Electron tree (and desktop/icons) and uses **host** libraries for GTK, NSS, Mesa, and the rest of the `.deb` Depends. That matches the primary target — **SteamOS / Steam Deck Desktop Mode** via [Gear Lever](https://github.com/mijorus/gearlever) — where those libraries are already present. Other distros may need to install missing packages (same set the official `.deb` would pull in).
 
 This project is **not affiliated with OpenAI**. Redistribution of the official Linux build is in scope for this repo.
 
 ## Build
 
-On an amd64 Linux host (Ubuntu 24.04 is what the official app targets; that is also a good bundling host):
+On an amd64 Linux host:
 
 ```bash
-sudo apt-get install -y curl dpkg-dev squashfs-tools desktop-file-utils \
-  pkg-config libgtk-3-dev librsvg2-dev libpango1.0-dev libgdk-pixbuf-2.0-dev \
-  python3-gi gir1.2-gdkpixbuf-2.0 binutils \
-  libnotify4 libnss3 libxss1 libxtst6 libusb-1.0-0 libsecret-1-0
+sudo apt-get install -y curl dpkg squashfs-tools desktop-file-utils file
 
 ./scripts/build-appimage.sh
 ```
@@ -48,7 +45,6 @@ Local `./scripts/build-appimage.sh` still works if you want an AppImage without 
 | `--version VER` / `CHATGPT_VERSION` | Fetch `chatgpt_<VER>_amd64.deb` from the versioned pool |
 | `--latest-url` | Fetch the mutable rolling URL `…/latest/chatgpt_amd64.deb` |
 | `--output-dir DIR` / `OUTPUT_DIR` | Where to write the AppImage (default `dist/`) |
-| `--skip-gtk-plugin` | Bundle `ldd` deps only; skip GTK modules / pixbuf loaders |
 
 Default download path is the **APT `Packages` index** → versioned pool file + SHA-256, not the rolling `latest/` URL. The rolling file is overwritten in place and breaks checksum pins (see [openai/codex#38457](https://github.com/openai/codex/issues/38457)).
 
@@ -76,11 +72,19 @@ Build steps:
 
 1. Resolve and download the official amd64 `.deb` (SHA-256 when the Packages index is used).
 2. Extract it and copy `usr/lib/chatgpt/` unchanged into an AppDir (Chromium loads `resources.pak` / locales **next to the ELF**).
-3. Install the official `.desktop` + PNG (plus `StartupWMClass=ChatGPT` for KDE). `packaging/AppRun` is passed to linuxdeploy as `--custom-apprun` and reinstalled after bundling.
-4. Run [linuxdeploy](https://github.com/linuxdeploy/linuxdeploy) so GTK, NSS, ALSA, and other Ubuntu `.deb` Depends are copied into `usr/lib/` instead of being pulled from apt at runtime. [linuxdeploy-plugin-gtk](https://github.com/linuxdeploy/linuxdeploy-plugin-gtk) (pinned commit, not `master`) adds pixbuf loaders / immodules. Extra Electron `dlopen` libs (`libnotify`, NSS `softokn`/`freebl`/`nssdbm`, `libXss`, `libusb`, …) are passed with `--library`. Qt shims and the `resources/` tree are parked during this pass so linuxdeploy cannot rewrite musl/static ELFs, then restored. glibc, libGL, libdrm, and Vulkan stay on the **host** (GPU drivers).
-5. Pack with [appimagetool](https://github.com/AppImage/appimagetool) as `ChatGPT-<deb-version>-x86_64.AppImage`.
+3. Install the official `.desktop` + PNG (plus `StartupWMClass=ChatGPT` for KDE) and `packaging/AppRun`.
+4. Pack with [appimagetool](https://github.com/AppImage/appimagetool) as `ChatGPT-<deb-version>-x86_64.AppImage`.
 
-`NO_STRIP=1` is set so linuxdeploy does not strip the 300 MB Electron binary.
+There is **no linuxdeploy** pass. Shared libraries are not copied out of the build host. `AppRun` execs the official `ChatGPT` binary and does **not** set `LD_LIBRARY_PATH` (so host Mesa wins over any bundled SwiftShader/EGL lookup tricks).
+
+## Runtime libraries (thin)
+
+The official `.deb` Depends (GTK 3, NSS, ALSA, X11, …) plus Electron extras (`libXss`, `libXtst`, `libsecret`, …) must resolve on the **host**.
+
+- **SteamOS 3.8+ / Steam Deck Desktop Mode:** those SONAMEs are present; this is the supported target.
+- **Other distros:** install whatever the official package would (`libgtk-3-0`, `libnss3`, `libsecret-1-0`, `libxss1`, `libxtst6`, `libnotify4`, …). If `ldd` on `usr/lib/chatgpt/ChatGPT` reports `not found`, install that package — do not expect the AppImage to bundle it.
+- **glibc:** not bundled. The official `.deb` already wants a current `libc6` (SteamOS 3.8 ships 2.41). Very old Deck images may be too old.
+- **GPU:** Mesa / NVIDIA stay on the host. That is what you want on SteamOS.
 
 ## SteamOS / Gear Lever notes
 
@@ -92,16 +96,14 @@ Build steps:
   # or
   ./ChatGPT-*-x86_64.AppImage --appimage-extract-and-run
   ```
-- **glibc:** the AppImage does not bundle glibc. The official `.deb` already wants `libc6 >= 2.35`. Libraries bundled from Ubuntu 24.04 currently need **GLIBC_2.38** (the build script prints the floor). Current SteamOS / Bazzite / Arch snapshots are usually new enough; very old Deck images may not be.
 - **Sandbox:** the official package has no `chrome-sandbox`. Chromium uses user namespaces. If a host blocks those, start with `--no-sandbox` (last resort).
-- **GPU:** Mesa / NVIDIA stay on the host. That is what you want on SteamOS.
 - **xdg-open / git:** not bundled. The host’s tools are used for browser links and Codex git features.
 
 ## GUI / smoke checks
 
-The build script’s CLI smoke check is: the AppImage exists, is a 64-bit ELF, is executable, `--appimage-help` / `--appimage-offset` work, and `ChatGPT --version` matches the `.deb`. It also prints the glibc symbol floor of the bundled ELFs. It does **not** open the GUI (that would hang a headless build).
+The build script’s CLI smoke check is: the AppImage exists, is a 64-bit ELF, is executable, `--appimage-help` / `--appimage-offset` work, and `ChatGPT --version` matches the `.deb`. It does **not** open the GUI (that would hang a headless build).
 
-On a desktop, run the AppImage directly (needs **libfuse2** / `libfuse.so.2`). This packaging VM’s XFCE session (`DISPLAY=:1`) launched it with a native FUSE mount and showed the official **Sign in to ChatGPT** window — no extra Electron flags.
+On a desktop, run the AppImage directly (needs **libfuse2** / `libfuse.so.2`).
 
 If FUSE is missing:
 
@@ -113,6 +115,7 @@ APPIMAGE_EXTRACT_AND_RUN=1 ./dist/ChatGPT-*-x86_64.AppImage
 
 - arm64
 - Cloudflare / static URL redirects
+- Fat / linuxdeploy bundling of Ubuntu GTK/NSS for older distros
 
 ## License
 
