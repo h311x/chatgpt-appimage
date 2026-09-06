@@ -250,6 +250,7 @@ stage_appdir() {
   rm -rf "$APPDIR"
   mkdir -p \
     "$APPDIR/usr/bin" \
+    "$APPDIR/usr/lib" \
     "$APPDIR/usr/share/applications" \
     "$APPDIR/usr/share/icons/hicolor/1024x1024/apps" \
     "$APPDIR/usr/share/pixmaps" \
