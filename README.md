@@ -40,8 +40,9 @@ https://github.com/h311x/chatgpt-appimage/releases/download/*/ChatGPT-*-x86_64.A
 
 `.github/workflows/release-appimage.yml` builds that AppImage on `ubuntu-24.04` and publishes a GitHub Release (`v<deb-version>`, assets `ChatGPT-<ver>-x86_64.AppImage` and `ChatGPT-<ver>-x86_64.AppImage.zsync`). It does **not** commit binaries to git.
 
-- **Schedule:** every 6 hours, the job reads the official APT `Packages` index. If tag `v<ver>` already exists, it exits without building (idempotent).
-- **Manual:** Actions → **Release AppImage** → **Run workflow** (the workflow file must already be on `main`). Same skip rule if that version is already released.
+- **Schedule:** every 6 hours, the job reads the official APT `Packages` index. If `v<ver>` already has both the AppImage and `.zsync` assets, it exits without building (idempotent). A tag/release with missing assets is rebuilt and the assets are replaced.
+- **Manual:** Actions → **Release AppImage** → **Run workflow** (the workflow file must already be on `main`). Same skip rule, unless you check **force** to rebuild and replace assets for the current official `.deb` version.
+- **Packaging push:** a push to `main` that changes `scripts/build-appimage.sh`, `packaging/`, or this workflow rebuilds the current official version and replaces Release assets (so a packaging fix does not wait on the next OpenAI version bump).
 
 Local `./scripts/build-appimage.sh` still works if you want an AppImage without waiting for CI.
 
@@ -110,7 +111,7 @@ The official `.deb` Depends (GTK 3, NSS, ALSA, X11, …) plus Electron extras (`
 
 ## GUI / smoke checks
 
-The build script’s CLI smoke check is: the AppImage exists, is a 64-bit ELF, is executable, `--appimage-help` / `--appimage-offset` work, and `ChatGPT --version` matches the `.deb`. It does **not** open the GUI (that would hang a headless build).
+The build script’s CLI smoke check is: the AppImage exists, is a 64-bit ELF, is executable, ELF `.upd_info` contains the expected `gh-releases-zsync` string, the `.zsync` sidecar exists with a `Length` that matches the AppImage and a 40-hex `SHA-1`, and `--appimage-help` / `--appimage-offset` work. `ChatGPT --version` is logged; a mismatch is a note, not a failure. It does **not** open the GUI (that would hang a headless build).
 
 On a desktop, run the AppImage directly (needs **libfuse2** / `libfuse.so.2`). This packaging VM’s XFCE session (`DISPLAY=:1`) launched the thin AppImage with a native FUSE mount and showed the official **Sign in to ChatGPT** window — no extra Electron flags. SteamOS / Gear Lever is still the real target.
 

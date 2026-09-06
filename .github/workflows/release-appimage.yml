@@ -2,9 +2,20 @@ name: Release AppImage
 
 on:
   workflow_dispatch:
+    inputs:
+      force:
+        description: Rebuild and replace Release assets even if v<deb-version> already exists
+        type: boolean
+        default: false
   schedule:
     # A few times a day is enough; the official .deb does not move every few minutes.
     - cron: "17 */6 * * *"
+  push:
+    branches: [main]
+    paths:
+      - scripts/build-appimage.sh
+      - packaging/**
+      - .github/workflows/release-appimage.yml
 
 concurrency:
   group: release-appimage
@@ -40,16 +51,35 @@ jobs:
             echo "error: failed to parse chatgpt Version from Packages index" >&2
             exit 1
           fi
+          case "$VERSION" in
+            *[!0-9A-Za-z.+~:-]* | '')
+              echo "error: implausible Packages Version: ${VERSION}" >&2
+              exit 1
+              ;;
+          esac
           echo "Official Packages index: chatgpt ${VERSION}"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
-          if gh release view "v${VERSION}" >/dev/null 2>&1; then
-            echo "Release v${VERSION} already exists; skipping build and publish."
-            echo "skip=true" >> "$GITHUB_OUTPUT"
+          FORCE="${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.force) }}"
+
+          skip=false
+          if [ "$FORCE" = "true" ]; then
+            echo "Force rebuild requested; will build even if a Release exists."
+          elif gh release view "v${VERSION}" >/dev/null 2>&1; then
+            assets="$(gh release view "v${VERSION}" --json assets --jq '[.assets[].name] | join("\n")')"
+            appimage_name="ChatGPT-${VERSION}-x86_64.AppImage"
+            zsync_name="${appimage_name}.zsync"
+            if printf '%s\n' "$assets" | grep -Fxq "$appimage_name" \
+              && printf '%s\n' "$assets" | grep -Fxq "$zsync_name"; then
+              echo "Release v${VERSION} already has AppImage + zsync; skipping build and publish."
+              skip=true
+            else
+              echo "Release v${VERSION} exists but is missing AppImage and/or zsync; will rebuild and replace assets."
+            fi
           else
             echo "No GitHub Release for v${VERSION}; will build."
-            echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
+          echo "skip=${skip}" >> "$GITHUB_OUTPUT"
 
       - name: Install build dependencies
         if: steps.detect.outputs.skip != 'true'
@@ -101,13 +131,7 @@ jobs:
             echo "error: missing built AppImage, zsync sidecar, or version" >&2
             exit 1
           fi
-          if gh release view "v${VERSION}" >/dev/null 2>&1; then
-            echo "Release v${VERSION} already exists; not publishing a duplicate."
-            exit 0
-          fi
-          gh release create "v${VERSION}" "$APPIMAGE" "$ZSYNC" \
-            --title "ChatGPT AppImage ${VERSION}" \
-            --notes "$(cat <<EOF
+          NOTES="$(cat <<EOF
           Unofficial thin AppImage repack of OpenAI’s official ChatGPT Linux \`.deb\` for SteamOS / Gear Lever (drop into Gear Lever or \`~/AppImages\`). Not affiliated with OpenAI.
 
           This AppImage ships the official Electron tree only. GTK, NSS, and GPU libraries come from the **host** (SteamOS 3.8+ is fine; other distros may need the same packages as the official \`.deb\`).
@@ -117,3 +141,12 @@ jobs:
           Built from \`chatgpt_${VERSION}_amd64.deb\` (\`amd64\`). If FUSE is missing: \`APPIMAGE_EXTRACT_AND_RUN=1 ./ChatGPT-*-x86_64.AppImage\`.
           EOF
           )"
+          if gh release view "v${VERSION}" >/dev/null 2>&1; then
+            echo "Release v${VERSION} exists; uploading assets with --clobber."
+            gh release upload "v${VERSION}" "$APPIMAGE" "$ZSYNC" --clobber
+            gh release edit "v${VERSION}" --title "ChatGPT AppImage ${VERSION}" --notes "$NOTES"
+          else
+            gh release create "v${VERSION}" "$APPIMAGE" "$ZSYNC" \
+              --title "ChatGPT AppImage ${VERSION}" \
+              --notes "$NOTES"
+          fi
