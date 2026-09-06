@@ -25,13 +25,20 @@ Logs go to stderr. On success, stdout is a single line — the output path — s
 dist/ChatGPT-26.901.31953-x86_64.AppImage
 ```
 
-That name is stable enough for Gear Lever GitHub Releases wildcards later:
+That name is stable enough for Gear Lever GitHub Releases wildcards:
 
 ```text
 https://github.com/h311x/chatgpt-appimage/releases/download/*/ChatGPT-*-x86_64.AppImage
 ```
 
-GitHub Actions / scheduled releases are **not** in this v1 — build locally (or on a VM), then publish a Release by hand when you want Gear Lever to pick it up.
+### Automatic releases
+
+`.github/workflows/release-appimage.yml` builds that AppImage on `ubuntu-24.04` and publishes a GitHub Release (`v<deb-version>`, asset `ChatGPT-<ver>-x86_64.AppImage`). It does **not** commit binaries to git.
+
+- **Schedule:** every 6 hours, the job reads the official APT `Packages` index. If tag `v<ver>` already exists, it exits without building (idempotent).
+- **Manual:** Actions → **Release AppImage** → **Run workflow** (the workflow file must already be on `main`). Same skip rule if that version is already released.
+
+Local `./scripts/build-appimage.sh` still works if you want an AppImage without waiting for CI.
 
 ### Options
 
@@ -104,9 +111,7 @@ APPIMAGE_EXTRACT_AND_RUN=1 ./dist/ChatGPT-*-x86_64.AppImage
 
 ## Out of scope (v1)
 
-- GitHub Actions / scheduled builds
 - arm64
-- Publishing Releases from the build agent
 - Cloudflare / static URL redirects
 
 ## License

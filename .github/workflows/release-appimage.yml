@@ -1,0 +1,108 @@
+name: Release AppImage
+
+on:
+  workflow_dispatch:
+  schedule:
+    # A few times a day is enough; the official .deb does not move every few minutes.
+    - cron: "17 */6 * * *"
+
+concurrency:
+  group: release-appimage
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Detect official ChatGPT version
+        id: detect
+        run: |
+          set -euo pipefail
+          PACKAGES_URL="https://persistent.oaistatic.com/codex-app-prod/linux/deb/dists/stable/main/binary-amd64/Packages"
+          VERSION="$(curl -fsSL "$PACKAGES_URL" | awk '
+            $0 == "Package: chatgpt" { in_pkg=1; next }
+            in_pkg && $0 == "" { exit }
+            in_pkg && index($0, "Version: ") == 1 {
+              print substr($0, length("Version") + 3)
+              exit
+            }
+          ')"
+          if [ -z "$VERSION" ]; then
+            echo "error: failed to parse chatgpt Version from Packages index" >&2
+            exit 1
+          fi
+          echo "Official Packages index: chatgpt ${VERSION}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+          if gh release view "v${VERSION}" >/dev/null 2>&1; then
+            echo "Release v${VERSION} already exists; skipping build and publish."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No GitHub Release for v${VERSION}; will build."
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install build dependencies
+        if: steps.detect.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y curl dpkg-dev squashfs-tools desktop-file-utils \
+            pkg-config libgtk-3-dev librsvg2-dev libpango1.0-dev libgdk-pixbuf-2.0-dev \
+            python3-gi gir1.2-gdkpixbuf-2.0 binutils \
+            libnotify4 libnss3 libxss1 libxtst6 libusb-1.0-0 libsecret-1-0
+
+      - name: Build AppImage
+        if: steps.detect.outputs.skip != 'true'
+        id: build
+        run: |
+          set -euo pipefail
+          APPIMAGE="$(./scripts/build-appimage.sh)"
+          if [ ! -f "$APPIMAGE" ]; then
+            echo "error: build script did not produce a file: ${APPIMAGE:-<empty>}" >&2
+            exit 1
+          fi
+          base="$(basename "$APPIMAGE")"
+          if [[ ! "$base" =~ ^ChatGPT-(.+)-x86_64\.AppImage$ ]]; then
+            echo "error: unexpected AppImage name: $base" >&2
+            exit 1
+          fi
+          BUILT_VERSION="${BASH_REMATCH[1]}"
+          echo "Built ${APPIMAGE} (version ${BUILT_VERSION})"
+          echo "path=${APPIMAGE}" >> "$GITHUB_OUTPUT"
+          echo "version=${BUILT_VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Publish GitHub Release
+        if: steps.detect.outputs.skip != 'true'
+        env:
+          APPIMAGE: ${{ steps.build.outputs.path }}
+          VERSION: ${{ steps.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [ -z "${VERSION:-}" ] || [ ! -f "${APPIMAGE:-}" ]; then
+            echo "error: missing built AppImage path or version" >&2
+            exit 1
+          fi
+          if gh release view "v${VERSION}" >/dev/null 2>&1; then
+            echo "Release v${VERSION} already exists; not publishing a duplicate."
+            exit 0
+          fi
+          gh release create "v${VERSION}" "$APPIMAGE" \
+            --title "ChatGPT AppImage ${VERSION}" \
+            --notes "$(cat <<EOF
+          Unofficial AppImage repack of OpenAI’s official ChatGPT Linux \`.deb\` for SteamOS / Gear Lever (drop into Gear Lever or \`~/AppImages\`). Not affiliated with OpenAI.
+
+          Gear Lever update URL: \`https://github.com/h311x/chatgpt-appimage/releases/download/*/ChatGPT-*-x86_64.AppImage\`
+
+          Built from \`chatgpt_${VERSION}_amd64.deb\` (\`amd64\`). Needs host glibc ≥ 2.38. If FUSE is missing: \`APPIMAGE_EXTRACT_AND_RUN=1 ./ChatGPT-*-x86_64.AppImage\`.
+          EOF
+          )"
