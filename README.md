@@ -11,7 +11,7 @@ This project is **not affiliated with OpenAI**. Redistribution of the official L
 On an amd64 Linux host:
 
 ```bash
-sudo apt-get install -y curl dpkg squashfs-tools desktop-file-utils file
+sudo apt-get install -y curl dpkg squashfs-tools desktop-file-utils file zsync binutils
 
 ./scripts/build-appimage.sh
 ```
@@ -22,7 +22,15 @@ Logs go to stderr. On success, stdout is a single line — the output path — s
 dist/ChatGPT-26.901.31953-x86_64.AppImage
 ```
 
-That name is stable enough for Gear Lever GitHub Releases wildcards:
+Each AppImage embeds Gear Lever / AppImageSpec update information:
+
+```text
+gh-releases-zsync|h311x|chatgpt-appimage|latest|ChatGPT-*-x86_64.AppImage.zsync
+```
+
+After you drop a Release build into Gear Lever, updates should auto-detect from that metadata — no pasted URL. Releases also publish the companion `ChatGPT-<ver>-x86_64.AppImage.zsync` next to the AppImage.
+
+If a build has no embedded info (older files, or a tool that ignores `.upd_info`), the GitHub Releases wildcard still works as a manual fallback:
 
 ```text
 https://github.com/h311x/chatgpt-appimage/releases/download/*/ChatGPT-*-x86_64.AppImage
@@ -30,7 +38,7 @@ https://github.com/h311x/chatgpt-appimage/releases/download/*/ChatGPT-*-x86_64.A
 
 ### Automatic releases
 
-`.github/workflows/release-appimage.yml` builds that AppImage on `ubuntu-24.04` and publishes a GitHub Release (`v<deb-version>`, asset `ChatGPT-<ver>-x86_64.AppImage`). It does **not** commit binaries to git.
+`.github/workflows/release-appimage.yml` builds that AppImage on `ubuntu-24.04` and publishes a GitHub Release (`v<deb-version>`, assets `ChatGPT-<ver>-x86_64.AppImage` and `ChatGPT-<ver>-x86_64.AppImage.zsync`). It does **not** commit binaries to git.
 
 - **Schedule:** every 6 hours, the job reads the official APT `Packages` index. If tag `v<ver>` already exists, it exits without building (idempotent).
 - **Manual:** Actions → **Release AppImage** → **Run workflow** (the workflow file must already be on `main`). Same skip rule if that version is already released.
@@ -45,6 +53,7 @@ Local `./scripts/build-appimage.sh` still works if you want an AppImage without 
 | `--version VER` / `CHATGPT_VERSION` | Fetch `chatgpt_<VER>_amd64.deb` from the versioned pool |
 | `--latest-url` | Fetch the mutable rolling URL `…/latest/chatgpt_amd64.deb` |
 | `--output-dir DIR` / `OUTPUT_DIR` | Where to write the AppImage (default `dist/`) |
+| `UPDATE_INFORMATION` | Override the embedded `gh-releases-zsync|…` string (default: this repo’s GitHub Releases) |
 
 Default download path is the **APT `Packages` index** → versioned pool file + SHA-256, not the rolling `latest/` URL. The rolling file is overwritten in place and breaks checksum pins (see [openai/codex#38457](https://github.com/openai/codex/issues/38457)).
 
@@ -73,7 +82,7 @@ Build steps:
 1. Resolve and download the official amd64 `.deb` (SHA-256 when the Packages index is used).
 2. Extract it and copy `usr/lib/chatgpt/` unchanged into an AppDir (Chromium loads `resources.pak` / locales **next to the ELF**).
 3. Install the official `.desktop` + PNG (plus `StartupWMClass=ChatGPT` for KDE) and `packaging/AppRun`.
-4. Pack with [appimagetool](https://github.com/AppImage/appimagetool) as `ChatGPT-<deb-version>-x86_64.AppImage`.
+4. Pack with [appimagetool](https://github.com/AppImage/appimagetool) as `ChatGPT-<deb-version>-x86_64.AppImage`, passing `-u` / `UPDATE_INFORMATION` so the ELF `.upd_info` section and a `.zsync` sidecar are produced.
 
 There is **no linuxdeploy** pass. Shared libraries are not copied out of the build host. `AppRun` execs the official `ChatGPT` binary and does **not** set `LD_LIBRARY_PATH` (so host Mesa wins over any bundled SwiftShader/EGL lookup tricks).
 
@@ -89,7 +98,7 @@ The official `.deb` Depends (GTK 3, NSS, ALSA, X11, …) plus Electron extras (`
 ## SteamOS / Gear Lever notes
 
 - **Desktop Mode** is required for a GUI. Game Mode will not show this windowed Electron app usefully.
-- Install [Gear Lever](https://flathub.org/apps/it.mijorus.gearlever), drop the AppImage on it, and integrate. After GitHub Releases exist, set the update URL to `https://github.com/h311x/chatgpt-appimage/releases/download/*/ChatGPT-*-x86_64.AppImage`.
+- Install [Gear Lever](https://flathub.org/apps/it.mijorus.gearlever), drop the AppImage on it, and integrate. Release builds embed `gh-releases-zsync` metadata, so Gear Lever should offer updates without a manual URL. Fallback if it does not: `https://github.com/h311x/chatgpt-appimage/releases/download/*/ChatGPT-*-x86_64.AppImage`.
 - **FUSE:** type-2 AppImages mount via FUSE (`libfuse2`). SteamOS and some immutable images do not ship it. Gear Lever often extracts AppImages, which avoids FUSE. Otherwise:
   ```bash
   APPIMAGE_EXTRACT_AND_RUN=1 ./ChatGPT-*-x86_64.AppImage
