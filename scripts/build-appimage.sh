@@ -11,6 +11,12 @@ PACKAGES_URL="${CHATGPT_PACKAGES_URL:-$REPO_BASE/dists/stable/main/binary-amd64/
 ROLLING_DEB_URL="${CHATGPT_ROLLING_DEB_URL:-$REPO_BASE/latest/chatgpt_amd64.deb}"
 APPIMAGETOOL_URL="${APPIMAGETOOL_URL:-https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage}"
 
+# AppImageSpec GitHub Releases transport. Gear Lever reads ELF .upd_info and
+# only auto-detects strings matching gh-releases-zsync|…|.zsync, then looks up
+# that .zsync on the latest Release. linuxdeploy would read UPDATE_INFORMATION;
+# this script passes the same string to appimagetool -u.
+DEFAULT_UPDATE_INFORMATION="gh-releases-zsync|h311x|chatgpt-appimage|latest|ChatGPT-*-x86_64.AppImage.zsync"
+
 CACHE_DIR="${CACHE_DIR:-$ROOT/.cache}"
 WORK_DIR="${WORK_DIR:-$ROOT/build}"
 OUTPUT_DIR="${OUTPUT_DIR:-$ROOT/dist}"
@@ -42,6 +48,8 @@ Options:
 Environment:
   CHATGPT_DEB        Same as --deb
   CHATGPT_VERSION    Same as --version
+  UPDATE_INFORMATION Override embedded AppImage update info (default: GitHub
+                     Releases zsync for h311x/chatgpt-appimage)
   CACHE_DIR WORK_DIR OUTPUT_DIR
 EOF
 }
@@ -97,7 +105,7 @@ check_host() {
   [ "$(uname -s)" = Linux ] || die "Linux is required"
   [ "$(uname -m)" = x86_64 ] || die "v1 only supports amd64/x86_64 (host is $(uname -m))"
   local cmd
-  for cmd in curl dpkg-deb sha256sum file install desktop-file-validate mksquashfs awk; do
+  for cmd in curl dpkg-deb sha256sum file install desktop-file-validate mksquashfs awk zsyncmake readelf; do
     need_cmd "$cmd"
   done
   [ -f "$ROOT/packaging/AppRun" ] || die "missing $ROOT/packaging/AppRun"
@@ -299,15 +307,69 @@ WRAP
   install -m 0755 "$ROOT/packaging/AppRun" "$APPDIR/AppRun"
 }
 
+update_information() {
+  printf '%s\n' "${UPDATE_INFORMATION:-$DEFAULT_UPDATE_INFORMATION}"
+}
+
+# appimagetool -u embeds .upd_info and, if zsyncmake is on PATH, runs zsyncmake.
+# zsyncmake writes basename.AppImage.zsync in the current working directory, not
+# next to DESTINATION. Put the sidecar beside the AppImage so Releases can upload it.
+ensure_zsync_sidecar() {
+  local appimage="$1"
+  local dest="${appimage}.zsync"
+  local cwd_zsync="./$(basename "$appimage").zsync"
+
+  if [ -f "$dest" ]; then
+    log "zsync sidecar: $dest"
+    return
+  fi
+  if [ -f "$cwd_zsync" ]; then
+    mv "$cwd_zsync" "$dest"
+    log "zsync sidecar: $dest (moved from $cwd_zsync)"
+    return
+  fi
+
+  log "Generating $dest"
+  zsyncmake -u "$(basename "$appimage")" -o "$dest" "$appimage"
+  [ -f "$dest" ] || die "zsyncmake did not write $dest"
+}
+
+verify_embedded_update_info() {
+  local appimage="$1"
+  local expected
+  expected="$(update_information)"
+  local dump embedded
+  dump="$(readelf --string-dump=.upd_info --wide "$appimage")"
+  embedded="$(printf '%s\n' "$dump" | awk '
+    match($0, /gh-releases-zsync\|[^[:space:]]+/) {
+      print substr($0, RSTART, RLENGTH)
+      exit
+    }
+  ')"
+  [ -n "$embedded" ] || die "no gh-releases-zsync string in .upd_info (Gear Lever will not auto-detect updates):
+$dump"
+  [ "$embedded" = "$expected" ] || die "embedded .upd_info is '$embedded', expected '$expected'"
+  log "embedded update information: $embedded"
+}
+
 pack_appimage() {
   APPIMAGE_PATH="$OUTPUT_DIR/ChatGPT-${DEB_VERSION}-x86_64.AppImage"
+  local upd
+  upd="$(update_information)"
   log "Packing $APPIMAGE_PATH"
-  rm -f "$APPIMAGE_PATH"
+  log "Update information: $upd"
+  rm -f "$APPIMAGE_PATH" "${APPIMAGE_PATH}.zsync" "./$(basename "$APPIMAGE_PATH").zsync"
   export APPIMAGE_EXTRACT_AND_RUN=1
   export ARCH=x86_64
   export VERSION="$DEB_VERSION"
-  "$CACHE_DIR/appimagetool-x86_64.AppImage" --no-appstream "$APPDIR" "$APPIMAGE_PATH" >&2
+  # Same string linuxdeploy reads from UPDATE_INFORMATION; appimagetool needs -u.
+  export UPDATE_INFORMATION="$upd"
+  "$CACHE_DIR/appimagetool-x86_64.AppImage" \
+    --no-appstream \
+    --updateinformation "$upd" \
+    "$APPDIR" "$APPIMAGE_PATH" >&2
   chmod 0755 "$APPIMAGE_PATH"
+  ensure_zsync_sidecar "$APPIMAGE_PATH"
 }
 
 smoke_check() {
@@ -316,6 +378,8 @@ smoke_check() {
   [ -f "$out" ] || die "AppImage not created: $out"
   [ -x "$out" ] || die "AppImage is not executable: $out"
   file "$out" | grep -q 'ELF 64-bit' || die "AppImage is not an ELF 64-bit file: $(file "$out")"
+  [ -f "${out}.zsync" ] || die "missing zsync sidecar: ${out}.zsync"
+  verify_embedded_update_info "$out"
 
   export APPIMAGE_EXTRACT_AND_RUN=1
   "$out" --appimage-help >/dev/null 2>&1

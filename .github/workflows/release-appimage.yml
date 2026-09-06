@@ -56,7 +56,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y curl dpkg squashfs-tools desktop-file-utils file
+          sudo apt-get install -y curl dpkg squashfs-tools desktop-file-utils file zsync binutils
 
       - name: Build AppImage
         if: steps.detect.outputs.skip != 'true'
@@ -74,33 +74,45 @@ jobs:
             exit 1
           fi
           BUILT_VERSION="${BASH_REMATCH[1]}"
+          ZSYNC="${APPIMAGE}.zsync"
+          if [ ! -f "$ZSYNC" ]; then
+            echo "error: missing zsync sidecar: $ZSYNC" >&2
+            exit 1
+          fi
           echo "Built ${APPIMAGE} (version ${BUILT_VERSION})"
+          readelf --string-dump=.upd_info --wide "$APPIMAGE"
+          if ! readelf --string-dump=.upd_info --wide "$APPIMAGE" | grep -F -q 'gh-releases-zsync|h311x|chatgpt-appimage|latest|ChatGPT-*-x86_64.AppImage.zsync'; then
+            echo "error: AppImage is missing the expected .upd_info string" >&2
+            exit 1
+          fi
           echo "path=${APPIMAGE}" >> "$GITHUB_OUTPUT"
+          echo "zsync=${ZSYNC}" >> "$GITHUB_OUTPUT"
           echo "version=${BUILT_VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Publish GitHub Release
         if: steps.detect.outputs.skip != 'true'
         env:
           APPIMAGE: ${{ steps.build.outputs.path }}
+          ZSYNC: ${{ steps.build.outputs.zsync }}
           VERSION: ${{ steps.build.outputs.version }}
         run: |
           set -euo pipefail
-          if [ -z "${VERSION:-}" ] || [ ! -f "${APPIMAGE:-}" ]; then
-            echo "error: missing built AppImage path or version" >&2
+          if [ -z "${VERSION:-}" ] || [ ! -f "${APPIMAGE:-}" ] || [ ! -f "${ZSYNC:-}" ]; then
+            echo "error: missing built AppImage, zsync sidecar, or version" >&2
             exit 1
           fi
           if gh release view "v${VERSION}" >/dev/null 2>&1; then
             echo "Release v${VERSION} already exists; not publishing a duplicate."
             exit 0
           fi
-          gh release create "v${VERSION}" "$APPIMAGE" \
+          gh release create "v${VERSION}" "$APPIMAGE" "$ZSYNC" \
             --title "ChatGPT AppImage ${VERSION}" \
             --notes "$(cat <<EOF
           Unofficial thin AppImage repack of OpenAI’s official ChatGPT Linux \`.deb\` for SteamOS / Gear Lever (drop into Gear Lever or \`~/AppImages\`). Not affiliated with OpenAI.
 
           This AppImage ships the official Electron tree only. GTK, NSS, and GPU libraries come from the **host** (SteamOS 3.8+ is fine; other distros may need the same packages as the official \`.deb\`).
 
-          Gear Lever update URL: \`https://github.com/h311x/chatgpt-appimage/releases/download/*/ChatGPT-*-x86_64.AppImage\`
+          Update metadata is embedded (\`gh-releases-zsync\`). After integrating this AppImage, Gear Lever should detect GitHub Releases updates without a pasted URL. Fallback wildcard: \`https://github.com/h311x/chatgpt-appimage/releases/download/*/ChatGPT-*-x86_64.AppImage\`
 
           Built from \`chatgpt_${VERSION}_amd64.deb\` (\`amd64\`). If FUSE is missing: \`APPIMAGE_EXTRACT_AND_RUN=1 ./ChatGPT-*-x86_64.AppImage\`.
           EOF
