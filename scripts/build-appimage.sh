@@ -311,45 +311,73 @@ update_information() {
   printf '%s\n' "${UPDATE_INFORMATION:-$DEFAULT_UPDATE_INFORMATION}"
 }
 
-# appimagetool -u embeds .upd_info and, if zsyncmake is on PATH, runs zsyncmake.
-# zsyncmake writes basename.AppImage.zsync in the current working directory, not
-# next to DESTINATION. Put the sidecar beside the AppImage so Releases can upload it.
+zsync_header_field() {
+  local file="$1" field="$2"
+  # Header is ASCII up to the first blank line; the rest is binary block hashes.
+  head -c 4096 "$file" | awk -v field="$field" '
+    $0 == "" { exit }
+    index($0, field ": ") == 1 {
+      print substr($0, length(field) + 3)
+      exit
+    }
+  '
+}
+
+# Gear Lever's GitHub backend uses the zsync SHA-1 to decide if an update exists.
+# A Length:0 / empty-hash sidecar (seen from broken appimagetool zsyncmake) would
+# make every check look like an update. Reject those instead of publishing them.
+zsync_sidecar_valid() {
+  local appimage="$1" zsync="$2"
+  [ -f "$zsync" ] || return 1
+  local size length filename sha
+  size="$(stat -c '%s' "$appimage")"
+  length="$(zsync_header_field "$zsync" Length)"
+  filename="$(zsync_header_field "$zsync" Filename)"
+  sha="$(zsync_header_field "$zsync" SHA-1)"
+  [ -n "$length" ] && [ "$length" = "$size" ] || return 1
+  [ "$filename" = "$(basename "$appimage")" ] || return 1
+  printf '%s\n' "$sha" | grep -Eq '^[0-9a-f]{40}$'
+}
+
+# appimagetool -u embeds .upd_info and, if zsyncmake is on PATH, runs
+# `zsyncmake -u basename DESTINATION` with no -o, so the sidecar lands in cwd
+# (not next to DESTINATION unless cwd is OUTPUT_DIR). Keep it beside the AppImage.
 ensure_zsync_sidecar() {
   local appimage="$1"
   local dest="${appimage}.zsync"
   local cwd_zsync="./$(basename "$appimage").zsync"
 
-  if [ -f "$dest" ]; then
+  if [ ! -f "$dest" ] && [ -f "$cwd_zsync" ]; then
+    mv "$cwd_zsync" "$dest"
+    log "zsync sidecar: $dest (moved from $cwd_zsync)"
+  fi
+
+  if zsync_sidecar_valid "$appimage" "$dest"; then
     log "zsync sidecar: $dest"
     return
   fi
-  if [ -f "$cwd_zsync" ]; then
-    mv "$cwd_zsync" "$dest"
-    log "zsync sidecar: $dest (moved from $cwd_zsync)"
-    return
-  fi
 
-  log "Generating $dest"
+  if [ -f "$dest" ]; then
+    log "zsync sidecar invalid; regenerating $dest"
+    rm -f "$dest"
+  else
+    log "Generating $dest"
+  fi
   zsyncmake -u "$(basename "$appimage")" -o "$dest" "$appimage"
   [ -f "$dest" ] || die "zsyncmake did not write $dest"
+  zsync_sidecar_valid "$appimage" "$dest" || die "zsync sidecar is invalid: $dest"
 }
 
 verify_embedded_update_info() {
   local appimage="$1"
-  local expected
+  local expected dump
   expected="$(update_information)"
-  local dump embedded
   dump="$(readelf --string-dump=.upd_info --wide "$appimage")"
-  embedded="$(printf '%s\n' "$dump" | awk '
-    match($0, /gh-releases-zsync\|[^[:space:]]+/) {
-      print substr($0, RSTART, RLENGTH)
-      exit
-    }
-  ')"
-  [ -n "$embedded" ] || die "no gh-releases-zsync string in .upd_info (Gear Lever will not auto-detect updates):
+  if ! printf '%s\n' "$dump" | grep -F -q "$expected"; then
+    die "embedded .upd_info does not contain '$expected':
 $dump"
-  [ "$embedded" = "$expected" ] || die "embedded .upd_info is '$embedded', expected '$expected'"
-  log "embedded update information: $embedded"
+  fi
+  log "embedded update information: $expected"
 }
 
 pack_appimage() {
@@ -364,10 +392,14 @@ pack_appimage() {
   export VERSION="$DEB_VERSION"
   # Same string linuxdeploy reads from UPDATE_INFORMATION; appimagetool needs -u.
   export UPDATE_INFORMATION="$upd"
-  "$CACHE_DIR/appimagetool-x86_64.AppImage" \
-    --no-appstream \
-    --updateinformation "$upd" \
-    "$APPDIR" "$APPIMAGE_PATH" >&2
+  # Run from OUTPUT_DIR so appimagetool's zsyncmake (cwd, no -o) lands next to the AppImage.
+  (
+    cd "$OUTPUT_DIR" || exit 1
+    "$CACHE_DIR/appimagetool-x86_64.AppImage" \
+      --no-appstream \
+      --updateinformation "$upd" \
+      "$APPDIR" "$APPIMAGE_PATH" >&2
+  )
   chmod 0755 "$APPIMAGE_PATH"
   ensure_zsync_sidecar "$APPIMAGE_PATH"
 }
@@ -378,7 +410,7 @@ smoke_check() {
   [ -f "$out" ] || die "AppImage not created: $out"
   [ -x "$out" ] || die "AppImage is not executable: $out"
   file "$out" | grep -q 'ELF 64-bit' || die "AppImage is not an ELF 64-bit file: $(file "$out")"
-  [ -f "${out}.zsync" ] || die "missing zsync sidecar: ${out}.zsync"
+  zsync_sidecar_valid "$out" "${out}.zsync" || die "missing or invalid zsync sidecar: ${out}.zsync"
   verify_embedded_update_info "$out"
 
   export APPIMAGE_EXTRACT_AND_RUN=1
