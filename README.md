@@ -103,7 +103,7 @@ The official `.deb` Depends (GTK 3, NSS, ALSA, X11, …) plus Electron extras (`
 
 The build script’s CLI smoke check is: the AppImage exists, is a 64-bit ELF, is executable, `--appimage-help` / `--appimage-offset` work, and `ChatGPT --version` matches the `.deb`. It does **not** open the GUI (that would hang a headless build).
 
-On a desktop, run the AppImage directly (needs **libfuse2** / `libfuse.so.2`).
+On a desktop, run the AppImage directly (needs **libfuse2** / `libfuse.so.2`). This packaging VM’s XFCE session (`DISPLAY=:1`) launched the thin AppImage with a native FUSE mount and showed the official **Sign in to ChatGPT** window — no extra Electron flags. SteamOS / Gear Lever is still the real target.
 
 If FUSE is missing:
 
